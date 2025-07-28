@@ -1,5 +1,3 @@
-# forecasting_module.py
-
 import numpy as np
 import pandas as pd
 import joblib
@@ -14,10 +12,11 @@ def load_models(bank_code):
     lstm = load_model(f"{base_path}/lstm_model.h5")
     scaler = joblib.load(f"{base_path}/scaler.pkl")
     close_prices = np.load(f"{base_path}/close_prices.npy")
-    return arima, lstm, scaler, close_prices
+    lowess_data = np.load(f"{base_path}/lowess.npy")
+    return arima, lstm, scaler, close_prices, lowess_data
 
 def create_forecast(bank_code, days, start_date, use_hybrid=True):
-    arima, lstm, scaler, close_prices = load_models(bank_code)
+    arima, lstm, scaler, close_prices, lowess_data = load_models(bank_code)
     scaled = scaler.transform(close_prices)
 
     seq_length = 10
@@ -38,20 +37,23 @@ def create_forecast(bank_code, days, start_date, use_hybrid=True):
             for d, v in zip(forecast_dates, lstm_pred)
         ]
 
-    # Smoothing Regression
-    train_data = scaled[:int(len(scaled) * 0.8)]
-    smoothed = sm.nonparametric.lowess(train_data.flatten(), np.arange(len(train_data)), frac=0.1)[:, 1]
-    smooth_model = ExponentialSmoothing(smoothed, trend='add').fit()
+    # Lowess forecast
+    smooth_model = ExponentialSmoothing(lowess_data, trend='add').fit()
     smooth_pred = scaler.inverse_transform(smooth_model.forecast(days).reshape(-1, 1))
 
+    # ARIMA forecast
     arima_pred = scaler.inverse_transform(arima.predict(n_periods=days).reshape(-1, 1))
 
-    # Gabung hybrid
+    # Hybrid OLS regression
     hybrid_input = np.column_stack((arima_pred, lstm_pred, smooth_pred))
     hybrid_input = sm.add_constant(hybrid_input)
+
     y_actual = close_prices[-days:]
-    reg_model = sm.OLS(y_actual, hybrid_input).fit()
-    final_pred = reg_model.predict(hybrid_input)
+    if len(y_actual) < days:
+        final_pred = hybrid_input[:, 1:].mean(axis=1)
+    else:
+        reg_model = sm.OLS(y_actual, hybrid_input).fit()
+        final_pred = reg_model.predict(hybrid_input)
 
     forecast_dates = pd.date_range(start=start_date, periods=days)
     return [
