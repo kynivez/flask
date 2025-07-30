@@ -2,12 +2,11 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import yfinance as yf
 from forecasting_module import create_forecast
-from datetime import timedelta, date # <-- Tambahkan 'date'
+from datetime import timedelta, date
 import numpy as np
 
 app = Flask(__name__)
 
-# A dictionary mapping bank codes to their full names and Yahoo Finance tickers
 AVAILABLE_BANKS = {
     "BRIS": {"name": "Bank Syariah Indonesia", "ticker": "BRIS.JK"},
     "BTPS": {"name": "Bank BTPN Syariah", "ticker": "BTPS.JK"},
@@ -17,15 +16,10 @@ AVAILABLE_BANKS = {
 
 @app.route('/forecast', methods=['GET'])
 def forecast():
-    """
-    Generates a stock forecast and merges it with historical data.
-    For today's date, it attempts to fetch the latest intraday price.
-    """
     bank_code = request.args.get('bank')
     days = request.args.get('days', default=30, type=int)
     start_date_str = request.args.get('start_date')
 
-    # --- 1. Validate Input Parameters ---
     if not bank_code or bank_code.upper() not in AVAILABLE_BANKS:
         return jsonify({"error": "Invalid or missing 'bank' parameter."}), 400
 
@@ -40,19 +34,17 @@ def forecast():
     ticker = AVAILABLE_BANKS[bank_code.upper()]["ticker"]
     stock = yf.Ticker(ticker)
 
-    # --- 2. Generate Forecasts ---
+    # === Create Forecast ===
     predictions = create_forecast(bank_code.upper(), days=days, start_date=start_date_str)
 
     if isinstance(predictions, dict) and "error" in predictions:
         return jsonify(predictions), 500
 
-    # --- 3. Create a DataFrame from Predictions ---
     df_pred = pd.DataFrame(predictions)
     df_pred['date'] = pd.to_datetime(df_pred['date']).dt.strftime('%Y-%m-%d')
 
-
-    # --- 4. Fetch Actual Historical Data (Closing Prices) ---
-    df_actual = pd.DataFrame() 
+    # === Ambil Data Historis ===
+    df_actual = pd.DataFrame()
     try:
         end_date = start_date + timedelta(days=days * 2)
         df_actual_raw = stock.history(start=start_date_str, end=end_date.strftime('%Y-%m-%d'), auto_adjust=True)
@@ -66,42 +58,32 @@ def forecast():
     except Exception as e:
         print(f"Could not fetch historical data for {ticker}. Error: {e}")
 
-    # --- 5. Merge Prediction and Historical Data ---
+    # === Gabungkan prediksi dan data aktual ===
     if not df_actual.empty:
         df_comparison = pd.merge(
-            df_pred, 
-            df_actual[['date', 'actual_close']], 
-            on='date', 
+            df_pred,
+            df_actual[['date', 'actual_close']],
+            on='date',
             how='left'
         )
     else:
         df_comparison = df_pred
         df_comparison['actual_close'] = None
 
-    # --- 6. LOGIKA BARU: Coba Ambil Harga Terkini untuk Hari Ini ---
+    # === Ambil harga live (jika tersedia) ===
     try:
         today_str = date.today().strftime('%Y-%m-%d')
-        # Cek jika tanggal hari ini ada di dalam data peramalan
         if today_str in df_comparison['date'].values:
-            # Ambil data intraday (interval 15 menit) untuk hari ini
             df_today_live = stock.history(period='1d', interval='15m', auto_adjust=True)
-            
-            # Jika berhasil mendapatkan data...
             if not df_today_live.empty:
-                # Ambil harga terakhir yang tersedia
                 live_price = df_today_live['Close'].iloc[-1]
-                # Timpa nilai 'actual_close' untuk hari ini dengan harga terkini
                 df_comparison.loc[df_comparison['date'] == today_str, 'actual_close'] = live_price
     except Exception as e:
-        # Jika gagal (misal: pasar tutup), biarkan saja. Nilai akan tetap null.
         print(f"Could not fetch live price for {ticker}. It's likely the market is closed. Error: {e}")
 
-
-    # --- 7. Finalisasi Data ---
     df_comparison.replace({np.nan: None}, inplace=True)
     comparison_data = df_comparison.to_dict(orient='records')
 
-    # --- 8. Return the Unified Response ---
     return jsonify({
         "bank": bank_code.upper(),
         "start_date": start_date_str,
