@@ -1,0 +1,1 @@
+from .predict_model import create_forecast
